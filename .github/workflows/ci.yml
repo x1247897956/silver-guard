@@ -1,0 +1,31 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint-test:
+    name: lint + unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+      - name: 安装依赖
+        run: uv sync --extra dev
+      - name: 静态检查（ruff）
+        run: uv run --extra dev ruff check src eval tests
+      - name: 单元测试（pytest，全部离线，不需要 API key）
+        run: uv run --extra dev python -m pytest -q
+      - name: 数据集合规与结构预筛（零写入）
+        run: uv run python -m silverguard.gen_dataset audit
+      - name: 数据集构成统计
+        run: uv run python -m silverguard.gen_dataset stats
+      - name: 策略表语法自检（热加载路径）
+        run: uv run python -m silverguard.cli policy
+      - name: 状态机演示（单调不降 + 干预幂等）
+        run: uv run python -m silverguard.cli guard

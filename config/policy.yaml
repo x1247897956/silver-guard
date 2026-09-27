@@ -1,0 +1,166 @@
+# SilverGuard 策略表 —— 风险等级 → 干预动作 的确定性映射
+#
+# 为什么它独立于代码：
+#   策略是"这家机构的处置口径"，不是代码逻辑。把口径写在 YAML 里，
+#   它可以被热加载、被版本化、被回滚、被审计，也可以被当成一次实验条件
+#   （评测报告里带着 policy_version 一起跑）。
+#
+# 红线：LLM 不参与本文件的解释。它只输出证据（信号）与"建议等级"，
+#       最终等级与动作只由本文件决定；LLM 建议只在 policy.mode=llm_only 的
+#       对照实验（关掉策略引擎）里才被采纳。
+#
+# 结构说明：
+#   version              —— 策略表版本号，落进 runs 表与评测报告
+#   signals.counting     —— 计入"信号数"阈值的信号
+#   signals.context_only —— 只作上下文/触发器，**不计入**信号数
+#   rules.<key>          —— 一条触发规则。key 形如 `L3`、`L3_pattern`
+#                           （`_` 前的部分是等级）。**同一等级可以有多条规则**：
+#                           按声明顺序取第一条命中的，这样"主通道 + 补充通道"
+#                           表达在配置里，而不是把 OR 逻辑硬编码进代码。
+#     when.require_all   —— 必须全部出现的信号类型
+#     when.require_any   —— 至少出现一个的信号类型
+#     when_fields        —— 由代码注入的运行时事实（pattern_hit / victim_compromise）
+#     min_signals        —— 本条规则要求的最少"计数信号"数
+#     signal_floor: L2   —— 显式宣告"本规则的 min_signals / min_confidence
+#                           由 policy.tiers 的当前档位覆盖"（阈值扫描的主旋钮）；
+#                           没有这个标记的规则阈值是固定语义
+#     min_confidence     —— 要求的最高信号置信度下限
+#   actions.*            —— 动作定义、打扰对象、是否不可逆、授权所需等级
+#   policy               —— 引擎级参数：tiers（阈值档）、monotonic、幂等 TTL、mode
+
+version: "2026-09-27.1"
+
+signals:
+  counting:
+    - identity_doubt
+    - urgency
+    - money_action
+    - secrecy
+    - channel_anomaly
+  context_only:
+    - victim_compromise
+
+levels:
+  L0: { label: 正常,         rank: 0 }
+  L1: { label: 可疑,         rank: 1 }
+  L2: { label: 高度可疑,     rank: 2 }
+  L3: { label: 极可能诈骗,   rank: 3 }
+  L4: { label: 确认诈骗特征, rank: 4 }
+
+# ── 触发规则 ──────────────────────────────────────────────────────────
+rules:
+  # L4 = 确认诈骗特征：资金动作 + 保密要求 + **老人已被说服**。
+  # 为什么要同时要 secrecy：家属正常要钱、老人一口答应的对话只有
+  # money_action + victim_compromise——若 L4 只看这两条，就会把
+  # "妈，学费差 8000" 误阻断（L4 误报是本项目最贵的错误）。
+  L4:
+    when:
+      require_all: [money_action, secrecy]
+    when_fields:
+      victim_compromise: true
+    min_signals: 0
+    min_confidence: 0.0
+
+  # L3 主通道 = 极可能诈骗：资金动作 + 任一语境证据。
+  # `identity_doubt` 是规范名（LLM 常输出的 authority_claim 在 models.py 里归一化）。
+  L3:
+    when:
+      require_all: [money_action]
+      require_any: [secrecy, identity_doubt]
+    min_signals: 0
+    min_confidence: 0.0
+
+  # L3 补充通道：命中已知话术规则（check_fraud_pattern 的确定性结论）。
+  # 它让"工具真的影响了决策"这件事在策略表里可见、可审计。
+  L3_pattern:
+    when:
+      require_all: [money_action]
+    when_fields:
+      pattern_hit: true
+    min_signals: 0
+    min_confidence: 0.0
+
+  # L3 补充通道：老人已被说服（本人转述"是我自己要转的"）。
+  L3_compromise:
+    when:
+      require_all: [money_action]
+    when_fields:
+      victim_compromise: true
+    min_signals: 0
+    min_confidence: 0.0
+
+  # L2 = 高度可疑：达到当前阈值档的信号数（阈值扫描的主旋钮就在这里）。
+  # `signal_floor: L2` 明确宣告"本规则的 min_signals / min_confidence 由
+  # policy.tiers 的当前档位覆盖"——没有这个标记的规则阈值是固定语义，
+  # 阈值扫描不会误改它们。
+  L2:
+    signal_floor: L2
+    when:
+      require_all: []
+      require_any: []
+    min_signals: 2
+    min_confidence: 0.5
+
+  # L2 补充通道：命中已知话术规则即可，不额外要求信号数。
+  L2_pattern:
+    when:
+      require_all: []
+      require_any: []
+    when_fields:
+      pattern_hit: true
+    min_signals: 0
+    min_confidence: 0.0
+
+  # L1 = 可疑：任一弱信号。
+  L1:
+    when:
+      require_all: []
+      require_any: [channel_anomaly, identity_doubt, urgency, money_action, secrecy]
+    min_signals: 1
+    min_confidence: 0.0
+
+# ── 动作定义 ─────────────────────────────────────────────────────────
+actions:
+  none:
+    level: L0
+    notify: []
+    reversible: true
+  soft_reminder:
+    level: L1
+    notify: [elder]
+    reversible: true
+  require_confirm:
+    level: L2
+    notify: [elder]
+    reversible: true
+    require_restate: true
+  notify_family:
+    level: L3
+    notify: [elder, family]
+    reversible: false          # 不可逆：需要策略表授权等级
+    requires_authorized_level: L3
+  block_assist:
+    level: L4
+    notify: [elder, family]
+    reversible: false          # 不可逆：需要策略表授权等级
+    requires_authorized_level: L4
+
+# 等级 → 动作 的映射（引擎只用这一张表决定动作，不看别的）
+level_actions:
+  L0: none
+  L1: soft_reminder
+  L2: require_confirm
+  L3: notify_family
+  L4: block_assist
+
+# ── 引擎级参数 ───────────────────────────────────────────────────────
+policy:
+  mode: policy
+  monotonic: true         # 同一会话风险等级单调不降
+  idempotency_ttl_sec: 86400
+  active_tier: balanced
+  tiers:
+    strict:    { min_signals_l2: 3, min_confidence: 0.7 }   # 更保守：更少打扰、更多漏拦
+    balanced:  { min_signals_l2: 2, min_confidence: 0.5 }
+    lenient:   { min_signals_l2: 2, min_confidence: 0.3 }
+    recall:    { min_signals_l2: 1, min_confidence: 0.0 }    # 更激进：更少漏拦、更多打扰

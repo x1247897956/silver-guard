@@ -1,0 +1,40 @@
+# ── 内部材料（不得公开）─────────────────────────────
+AGENT-TASK.md
+docs/design/
+
+# ── 密钥 ────────────────────────────────────────────
+.env
+*.env
+!.env.example
+
+# ── Python ──────────────────────────────────────────
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.uvcache/
+.uvcache.*/
+.uvpython/
+.uvpython.*/
+
+# ── 运行产物 ────────────────────────────────────────
+# 逐案轨迹 / 评测结果 / 探针输出都是运行产物：不提交（体量大、可一键重跑）。
+# 文档里引用的示例轨迹放在 docs/assets/examples/ 下（小、人工挑选）。
+data/
+data/*.db
+data/*.db-journal
+*.log
+logs/
+.artifacts/
+
+# ── 其它工作区残留（本目录里出现过同名缓存/解释器目录）────
+uvcache.uv/
+uvpython.uv/
+
+# ── 编辑器 / 系统 ───────────────────────────────────
+.DS_Store
+.idea/
+.vscode/

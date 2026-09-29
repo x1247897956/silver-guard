@@ -70,7 +70,7 @@
       "n_attack_all": 0,
       "n_benign_all": 0,
       "ir": 47.5,
-      "pir": 12.5,
+      "pir": 99.99,
       "fpr_l2": 0.0,
       "fpr_l3": 0.0,
       "fpr_l4": 0.0,

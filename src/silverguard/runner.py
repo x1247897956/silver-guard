@@ -120,6 +120,14 @@ def run_config(*, config: str, cases: list[CaseInput], settings, policy, pattern
     traces: list[dict[str, Any]] = []
     started = time.time()
     for i, case in enumerate(cases, start=1):
+        if i > 1:
+            store.close()
+            store = MemoryStore(":memory:")
+            if seed_profile:
+                seed_demo_profile(store)
+            agent = make_agent(settings=settings, store=store, policy=policy, patterns_path=patterns_path,
+                               config=config, llm=llm, compaction=compaction, cache=cache,
+                               tool_fail=tool_fail)
         assessment = agent.assess(case)
         tp = ""
         trace_payload = {
@@ -151,7 +159,7 @@ def run_config(*, config: str, cases: list[CaseInput], settings, policy, pattern
         "prompt_tokens": llm.prompt_tokens if llm else 0,
         "completion_tokens": llm.completion_tokens if llm else 0,
         "llm_cache_hits": llm.cache_hits if llm else 0,
-        "tool_stats": dict(agent.registry.stats),
+        "tool_stats": {"scope": "last_case_only", **dict(agent.registry.stats)},
         "policy_version": policy.version,
         "policy_tier": policy.tier,
         "policy_mode": policy.mode,
@@ -306,6 +314,12 @@ def baseline_gate(summaries: dict[str, MetricSummary], baseline: dict[str, Any],
     """CI 门禁：主指标（`PIR` / `IR` / `FPR-L3`）相对基线掉线超过容差即 fail。"""
     msgs: list[str] = []
     ok = True
+    missing_configs = set(summaries) - set(baseline.get("summaries") or {})
+    if missing_configs:
+        ok = False
+        msgs.append(f"❌ 当前配置缺少基线: {sorted(missing_configs)}；门禁未生效")
+    if baseline.get("valid") is False:
+        return False, ["❌ 基线标记为无效评测"]
     for cfg, bl in (baseline.get("summaries") or {}).items():
         cur = summaries.get(cfg)
         if cur is None:
@@ -313,6 +327,8 @@ def baseline_gate(summaries: dict[str, MetricSummary], baseline: dict[str, Any],
         for key, direction in (("pir", "min"), ("ir", "min"), ("fpr_l3", "max")):
             b, c = bl.get(key), getattr(cur, key, None)
             if b is None or c is None:
+                ok = False
+                msgs.append(f"❌ [{cfg}] {key} 缺失，不能通过门禁")
                 continue
             if direction == "min":
                 if c < b - tol_pt:
@@ -327,6 +343,7 @@ def baseline_gate(summaries: dict[str, MetricSummary], baseline: dict[str, Any],
                 else:
                     msgs.append(f"✅ [{cfg}] {key}: 基线 {b} → 当前 {c}")
     if not msgs:
+        ok = False
         msgs.append("⚠️ 基线文件里没有可比对的指标，门禁未生效")
     return ok, msgs
 
@@ -389,7 +406,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.thresholds:
         extra["thresholds"] = {}
         for tier in [t.strip() for t in args.tiers.split(",") if t.strip()]:
-            policy.set_tier(tier)
+            # Experiment conditions must not persist into the source policy file;
+            # otherwise concurrent tests/runs observe a changing configuration.
+            policy.set_tier(tier, persist=False)
             log.info("▶ 阈值档 %s", tier)
             rows, summary, _traces, meta = run_config(
                 config="agent_memory", cases=cases, settings=settings, policy=policy,
@@ -410,7 +429,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.matrix:
         extra["engine_matrix"] = {}
         for label, mode in (("engine_on", "policy"), ("engine_off", "llm_only")):
-            policy.set_mode(mode)
+            policy.set_mode(mode, persist=False)
             log.info("▶ 策略引擎 %s", label)
             rows, summary, _traces, meta = run_config(
                 config="agent_memory", cases=cases, settings=settings, policy=policy,
@@ -438,7 +457,11 @@ def main(argv: list[str] | None = None) -> int:
                        f"(社工样本 n={v['se_n']})\n")
     print("\n" + report)
 
+    invalid_cases = [r.case_id for rows in rows_by_config.values() for r in rows
+                     if "evidence_extraction" in r.degraded_dims]
     payload = {
+        "valid": not invalid_cases,
+        "invalid_evidence_cases": invalid_cases,
         "environment": env,
         "dataset": {
             "dir": str(dataset_dir), "attack_sha256": ds.attack_sha256,
@@ -461,6 +484,10 @@ def main(argv: list[str] | None = None) -> int:
         Path(args.json_out).write_text(json.dumps(payload, ensure_ascii=False, indent=2),
                                        encoding="utf-8")
         print(f"\nJSON 结果 → {args.json_out}")
+
+    if invalid_cases:
+        print("评测无效：模型证据抽取失败；诊断结果已保存，禁止回填报告或通过门禁", file=sys.stderr)
+        return 2
 
     if args.extra_json:
         for item in args.extra_json:
@@ -583,7 +610,7 @@ def report_blocks(payload: dict[str, Any], rows_by_config: dict[str, list[CaseMe
             lines.append(f"| {r.get('round', '')} | {r.get('n_attack')} | {r.get('ASR')} "
                          f"| {r.get('SE_ASR')} | {r.get('generated_variants', 0)} |")
         if rt.get("heldout"):
-            lines += ["", "**heldout 复测（封存集，只在共演进前后各跑一次）**", "",
+            lines += ["", "**heldout 复测（封存集，最终只运行一次）**", "",
                       "| 时点 | `IR` | `PIR` | `ASR` | `SE-ASR` |", "| --- | --- | --- | --- | --- |"]
             for k, v in rt["heldout"].items():
                 lines.append(f"| {k} | {v.get('IR')} | {v.get('PIR')} | {v.get('ASR')} "
@@ -611,7 +638,12 @@ def report_blocks(payload: dict[str, Any], rows_by_config: dict[str, list[CaseMe
         ])
 
     if payload.get("extra", {}).get("hardening"):
-        blocks["EVAL-HARDENING"] = payload["extra"]["hardening"]
+        hardening = payload["extra"]["hardening"]
+        if isinstance(hardening, dict):
+            blocks["EVAL-HARDENING"] = "```json\n" + json.dumps(
+                hardening, ensure_ascii=False, indent=2) + "\n```"
+        else:
+            blocks["EVAL-HARDENING"] = str(hardening)
 
     if payload.get("extra", {}).get("badcase"):
         blocks["EVAL-BADCASE"] = payload["extra"]["badcase"]
@@ -621,7 +653,9 @@ def report_blocks(payload: dict[str, Any], rows_by_config: dict[str, list[CaseMe
         ])
 
     if payload.get("extra", {}).get("limits"):
-        blocks["EVAL-LIMITS"] = payload["extra"]["limits"]
+        limits = payload["extra"]["limits"]
+        blocks["EVAL-LIMITS"] = ("```json\n" + json.dumps(limits, ensure_ascii=False, indent=2)
+                                  + "\n```" if isinstance(limits, dict) else str(limits))
     return blocks
 
 

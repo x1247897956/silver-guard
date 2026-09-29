@@ -50,7 +50,7 @@ def test_baseline_gate_warns_when_nothing_comparable():
     from silverguard.runner import baseline_gate
 
     ok, msgs = baseline_gate({"rule": summarize("rule", [])}, {"summaries": {}})
-    assert ok is True
+    assert ok is False
     assert any("门禁未生效" in m for m in msgs)
 
 
@@ -142,7 +142,9 @@ def test_mutate_case_produces_valid_row():
     assert row["case_id"].startswith("rt-atk-x-")
     assert row["parent_case_id"] == "atk-x"
     assert row["mutation"] == "repackage"
-    assert row["manual_review"]["reviewed"] is True
+    assert row["manual_review"]["reviewed"] is False
+    assert row["transfer_turn"] is None
+    assert row["gold_min_level"] is None
 
 
 def test_mutate_case_rejects_noncompliant_variant():
@@ -156,7 +158,7 @@ def test_mutate_case_rejects_noncompliant_variant():
     assert row is not None
     assert compliance_scan([row]), "合规扫描必须命中"
     # 真实流程里这条会被丢弃（见 run_redteam 的预筛）；这里断言闸门确实有效
-    assert validate_case(row, is_attack=True) == []
+    assert validate_case(row, is_attack=True)
 
 
 def test_redteam_round_structure_with_fake_paths(tmp_path: Path, monkeypatch):
@@ -185,13 +187,14 @@ def test_redteam_round_structure_with_fake_paths(tmp_path: Path, monkeypatch):
     assert result["rounds"], "至少要有 R0"
     assert result["rounds"][0]["round"] == "R0"
     assert "IR" in result["rounds"][0] and "SE_ASR" in result["rounds"][0]
-    assert "baseline" in result["heldout"] and "after_evolution" in result["heldout"]
+    assert result["heldout"] == {}
     assert result["dataset"]["attack_sha256"]
     # R0 之后必须真的产生过变异样本，并且单独落盘（不回写 attack.jsonl）
     variants = list((tmp_path / "rt").glob("attack_redteam_R*.jsonl"))
     assert variants, "第二轮之前必须落盘变异样本"
     assert "generated_variants" in result["rounds"][0]
-    assert result["rounds"][1]["n_mutated_included"] > 0, "变异样本必须进入下一轮评测"
+    assert len(result["rounds"]) == 1
+    assert result["pending_review"]
 
 
 PATHS_POLICY = PATTERNS_PATH.parent / "policy.yaml"
@@ -220,6 +223,7 @@ def test_persuasion_metrics_shape(monkeypatch, settings):
                         dataset_dir=ds_dir)
     monkeypatch.setattr(rt, "elder_simulator",
                         lambda s, p, r: {"will_transfer": "没有提醒" not in r, "reason": "假"})
+    monkeypatch.setattr(rt, "LLMClient", lambda **kw: MutatorLLM())
     import silverguard.config as cfg
 
     monkeypatch.setattr(cfg, "get_settings", lambda **kw: settings)
@@ -227,3 +231,21 @@ def test_persuasion_metrics_shape(monkeypatch, settings):
     assert out["n"] == 2
     assert out["persuasion_success_rate"] is not None
     assert out["baseline_giveup_rate"] is not None
+
+
+def test_redteam_rejects_heldout_before_loading():
+    import pytest
+
+    from silverguard.redteam import run_redteam
+
+    with pytest.raises(ValueError, match="heldout"):
+        run_redteam(heldout_eval=True)
+
+
+def test_gate_rejects_missing_metric():
+    from silverguard.runner import baseline_gate
+
+    summary = summarize("rule", [])
+    summary.ir = 50.0
+    ok, _ = baseline_gate({"rule": summary}, {"summaries": {"rule": {"ir": 50.0, "pir": 40.0, "fpr_l3": 0.0}}})
+    assert not ok

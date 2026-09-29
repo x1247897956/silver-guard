@@ -52,6 +52,20 @@ def test_replay_dir_reports_consistency(store, policy, tmp_path: Path, fake_llm)
     assert result["trace_missing_versions"] == []
 
 
+def test_replay_skips_legacy_trace_without_model_cache(tmp_path: Path):
+    """旧轨迹缺少模型输出，必须单独计数，不能混入回放分母。"""
+    from silverguard.replay import replay_dir
+
+    trace_dir = tmp_path / "runs"
+    trace_dir.mkdir()
+    (trace_dir / "agent__legacy.json").write_text(
+        json.dumps({"case_id": "legacy", "turns": []}), encoding="utf-8")
+    result = replay_dir(trace_dir, config="agent")
+    assert result["replayed"] == 0
+    assert result["skipped_legacy_traces"] == 1
+    assert result["replay_consistency_rate"] is None
+
+
 def test_replay_detects_policy_version_drift(store, policy, tmp_path: Path, fake_llm):
     """改一版策略后回放 → 一致率下降，且能定位到"是策略版本引起的"。"""
     from silverguard.config import Settings
@@ -203,4 +217,46 @@ def test_mcp_roundtrip_through_stdio():
     assert checks["profile_read_ok"]
     assert checks["invented_identifier_rejected"], "模型自造标识必须被拒"
     assert checks["low_privilege_rejected"], "不可逆动作必须受策略表授权等级约束"
-    assert checks["authorized_notify_ok"]
+    assert checks["forged_privilege_rejected"]
+    assert "notify_family" not in {tool["name"] for tool in out["tools"]}
+
+
+def test_service_reports_provider_failure_instead_of_success(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from silverguard.config import Settings
+    from silverguard.llm import LLMError
+    from silverguard.service import build_app
+
+    from .conftest import FakeLLM
+
+    class UnavailableLLM(FakeLLM):
+        def complete_json(self, **kwargs):
+            raise LLMError('HTTP 402')
+
+    monkeypatch.setattr('silverguard.service.LLMClient', lambda **kw: UnavailableLLM())
+    settings = Settings(api_key='test', policy_path=PATHS_POLICY, db_path=tmp_path / 'svc.db')
+    client = TestClient(build_app(settings=settings, store=MemoryStore(':memory:')))
+    response = client.post('/assess', json={
+        'case_id': 'provider-failure', 'turns': [{'role': 'caller', 'text': '您好'}],
+    })
+    assert response.status_code == 502
+    assert 'evidence_extraction' in response.json()['partial_assessment']['degraded_dims']
+    assert client.get('/metrics').json()['llm_errors'] == 1
+
+
+def test_service_replay_accepts_runner_trace_without_touching_live_store(store, policy, fake_llm):
+    from fastapi.testclient import TestClient
+
+    from silverguard.config import Settings
+    from silverguard.service import build_app
+
+    trace = _record_trace(store, policy, fake_llm, CASE)
+    live_store = MemoryStore(':memory:')
+    settings = Settings(api_key='', policy_path=PATHS_POLICY)
+    client = TestClient(build_app(settings=settings, store=live_store, policy=policy))
+    response = client.post('/replay', json={'trace': trace, 'config': 'agent'})
+    assert response.status_code == 200
+    assert response.json()['consistent'] is True
+    assert live_store.fetch_runs() == []
+    live_store.close()

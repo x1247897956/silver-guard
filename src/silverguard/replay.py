@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import logging
 from dataclasses import dataclass
@@ -29,6 +30,7 @@ from typing import Any
 from .agent import CaseInput, GuardianAgent
 from .config import REPO_ROOT, Settings, get_settings
 from .memory import MemoryStore, seed_demo_profile
+from .models import ToolCall
 from .policy import load_policy
 from .tools import ToolRuntime
 
@@ -80,9 +82,25 @@ def replay_trace(trace: dict[str, Any], *, settings: Settings, policy, patterns_
                           patterns_path=patterns_path, llm=None, config=config,
                           tool_runtime=ToolRuntime(store=store),
                           replay_cache=dict(trace.get("llm_cache") or {}))
+    recorded_calls = [copy.deepcopy(call) for turn in trace.get("turns", [])
+                      if upto_turn is None or turn.get("turn_index", 0) <= upto_turn
+                      for call in turn.get("tool_calls", [])]
+    pending = iter(recorded_calls)
+
+    def recorded_call(name, args, **kwargs):
+        raw = next(pending, None)
+        if raw is None or raw["name"] != name or raw["args"] != args:
+            raise ValueError(f"回放工具调用与录制不一致: {name}")
+        return ToolCall(**raw)
+
+    agent.registry.call = recorded_call
     agent.replaying = True
-    a = agent.assess(case)
-    store.close()
+    try:
+        a = agent.assess(case)
+        if next(pending, None) is not None:
+            raise ValueError("回放未消费全部录制工具调用")
+    finally:
+        store.close()
     return {"max_level": a.max_level, "first_l2_turn": a.first_l2_turn,
             "action": a.final_action, "timeline": a.level_timeline(),
             "policy_version": a.policy_version, "prompt_version": a.prompt_version}
@@ -95,6 +113,17 @@ def replay_dir(traces_dir: str | Path, *, settings: Settings | None = None,
     policy = load_policy(settings.policy_path)
     patterns_path = settings.policy_path.parent / "fraud_patterns.yaml"
     files = sorted(Path(traces_dir).glob(f"{config}__*.json"))
+    # Legacy traces without cached model outputs cannot be replayed deterministically.
+    # Exclude them from the denominator and report the count explicitly.
+    stale_files: list[Path] = []
+    usable_files: list[Path] = []
+    for path in files:
+        trace = load_trace(path)
+        if not isinstance(trace.get("llm_cache"), dict) or not trace["llm_cache"]:
+            stale_files.append(path)
+        else:
+            usable_files.append(path)
+    files = usable_files
     if limit:
         files = files[:limit]
     outcomes: list[ReplayOutcome] = []
@@ -123,10 +152,11 @@ def replay_dir(traces_dir: str | Path, *, settings: Settings | None = None,
                 f"{outcome.case_id}: 录制 {recorded['max_level']}/{recorded['first_l2_turn']}"
                 f"/{recorded['action']} → 回放 {replayed['max_level']}/{replayed['first_l2_turn']}"
                 f"/{replayed['action']}")
-    n = len(outcomes)
+    n = len(files)
     rate = None if n == 0 else round(sum(1 for o in outcomes if o.consistent) / n * 100, 2)
     return {
         "replayed": n, "consistent": sum(1 for o in outcomes if o.consistent),
+        "skipped_legacy_traces": len(stale_files),
         "replay_consistency_rate": rate, "mismatches": mismatches[:20],
         "trace_missing_versions": version_missing[:20],
         "policy_version": policy.version, "config": config, "upto_turn": upto_turn,

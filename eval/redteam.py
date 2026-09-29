@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """自动红队共演进入口（薄封装，实现见 src/silverguard/redteam.py）。
 
-⚠️ 措辞：这是**自动红队 / 对抗式评测**，不是"多智能体协作"。
+自动红队 / 对抗式评测入口。
 
     python eval/redteam.py --rounds 2 --persuasion
 """

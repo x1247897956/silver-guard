@@ -160,3 +160,9 @@ def test_metrics_from_assessment_maps_fields(store, policy):
     assert m.case_id == "m-1" and m.config == "rule"
     assert m.max_level == a.max_level and m.is_attack is True
     assert m.badcase_type() in (None, "拦截过晚（资金动作之后才拦）", "漏拦")
+
+
+def test_empty_tool_gold_is_not_a_success():
+    s = summarize("agent", [row(tool_expected_scope=["check_contact"], gold_tools=[],
+                               tool_correct=True)])
+    assert s.tool_accuracy is None

@@ -1,0 +1,17 @@
+{
+  "valid": true,
+  "source_command": "uv run --python 3.11 python -m silverguard.runner --configs agent_memory --split dev --ci-subset --traces-dir data/runs --json-out data/eval-ci-full-baseline.json",
+  "dataset": {
+    "attack_sha256": "1b72bc22585b7f668a772ad3322046565ace9ef8ffb300a43ec0074111a0d82d",
+    "benign_sha256": "4955646fe8cd4b2e961a5fc21e4a9ab11a4ad57f59f51b6ae749dde1d2d72321",
+    "attack_n": 40,
+    "benign_n": 25
+  },
+  "summaries": {
+    "agent_memory": {
+      "ir": 100.0,
+      "pir": 95.83,
+      "fpr_l3": 20.0
+    }
+  }
+}

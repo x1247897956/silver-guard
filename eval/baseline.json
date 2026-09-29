@@ -1,4 +1,6 @@
 {
+  "valid": true,
+  "invalid_evidence_cases": [],
   "environment": {
     "python": "3.11.16",
     "platform": "macOS-26.6.2-arm64-arm-64bit",
@@ -7,9 +9,9 @@
     "prompt_version": "p1.2.0"
   },
   "dataset": {
-    "dir": "/Users/seyr1n/01-Project/silver-guard/eval/dataset",
-    "attack_sha256": "ba63a139ae84be4554dcc069def19bfed7248ab3264f330899205056bdf8ec34",
-    "benign_sha256": "757f29c169acabfb3a0fe20f23fdd6cb1f0ff7c2cfb8e6bdde1e7cb55c286178",
+    "dir": "eval/dataset",
+    "attack_sha256": "1b72bc22585b7f668a772ad3322046565ace9ef8ffb300a43ec0074111a0d82d",
+    "benign_sha256": "4955646fe8cd4b2e961a5fc21e4a9ab11a4ad57f59f51b6ae749dde1d2d72321",
     "counts": {
       "attack": 90,
       "benign": 63,
@@ -19,18 +21,18 @@
       "benign_heldout": 19,
       "multi_turn": 90,
       "multi_turn_pct": 100.0,
-      "se_attack": 65,
-      "se_attack_pct": 72.22,
-      "has_transfer": 48,
-      "has_transfer_pct": 53.33,
+      "se_attack": 58,
+      "se_attack_pct": 64.44,
+      "has_transfer": 46,
+      "has_transfer_pct": 51.11,
       "hard_negative": 40,
       "hard_negative_pct": 63.49,
       "by_fraud_type": {
-        "impersonate_official": 17,
-        "refund_scam": 15,
-        "health_investment": 24,
-        "romance_pig_butcher": 15,
-        "fake_relative": 19
+        "impersonate_official": 35,
+        "refund_scam": 11,
+        "health_investment": 21,
+        "romance_pig_butcher": 5,
+        "fake_relative": 18
       },
       "by_benign_kind": {
         "daily": 23,
@@ -39,11 +41,11 @@
         "family_secrecy": 10
       },
       "by_se_type": {
-        "secrecy": 27,
-        "fake_authorization": 9,
-        "disable_guard": 4,
-        "elder_voice": 15,
-        "privilege_lure": 10
+        "secrecy": 54,
+        "fake_authorization": 2,
+        "disable_guard": 2,
+        "elder_voice": 0,
+        "privilege_lure": 0
       }
     },
     "run_split": "dev",
@@ -68,32 +70,32 @@
       "n_attack_all": 0,
       "n_benign_all": 0,
       "ir": 47.5,
-      "pir": 13.04,
+      "pir": 12.5,
       "fpr_l2": 0.0,
       "fpr_l3": 0.0,
       "fpr_l4": 0.0,
       "fpr_hard": 0.0,
       "asr": 52.5,
-      "se_asr": 43.33,
-      "se_n": 30,
+      "se_asr": 41.38,
+      "se_n": 29,
       "over_intervention": 0.0,
       "unauthorized_rate": 0.0,
       "unauthorized_count": 0,
       "actions_total": 42,
-      "tool_accuracy": 38.46,
+      "tool_accuracy": 0.0,
       "per_type_ir": {
-        "impersonate_official": 42.86,
-        "refund_scam": 25.0,
-        "health_investment": 77.78,
-        "romance_pig_butcher": 57.14,
-        "fake_relative": 33.33
+        "impersonate_official": 61.11,
+        "refund_scam": 0.0,
+        "health_investment": 57.14,
+        "romance_pig_butcher": 0.0,
+        "fake_relative": 36.36
       },
       "per_type_n": {
-        "impersonate_official": 7,
-        "refund_scam": 8,
-        "health_investment": 9,
-        "romance_pig_butcher": 7,
-        "fake_relative": 9
+        "impersonate_official": 18,
+        "refund_scam": 2,
+        "health_investment": 7,
+        "romance_pig_butcher": 2,
+        "fake_relative": 11
       },
       "p50_latency_ms": null,
       "p95_latency_ms": null,
@@ -110,7 +112,7 @@
   },
   "metas": {
     "rule": {
-      "wall_clock_sec": 0.0,
+      "wall_clock_sec": 0.1,
       "llm_calls": 0,
       "model_requested": "",
       "model_reported": "",
@@ -118,6 +120,7 @@
       "completion_tokens": 0,
       "llm_cache_hits": 0,
       "tool_stats": {
+        "scope": "last_case_only",
         "calls": 0,
         "schema_rejected": 0,
         "whitelist_rejected": 0,
@@ -149,18 +152,15 @@
   "badcases": {
     "rule": {
       "拦截过晚（资金动作之后才拦）": [
-        "atk-0002",
         "atk-0005",
+        "atk-0007",
         "atk-0010",
-        "atk-0016",
-        "atk-0020",
-        "atk-0024",
+        "atk-0026",
         "atk-0028",
         "atk-0029",
         "atk-0033",
         "atk-0034",
-        "atk-0035",
-        "atk-0043"
+        "atk-0036"
       ],
       "漏拦": [
         "atk-0003",
@@ -188,19 +188,5 @@
     }
   },
   "extra": {},
-  "wall_clock_sec": 0.0,
-  "baseline_of": {
-    "configs": [
-      "rule"
-    ],
-    "split": "dev",
-    "ci_subset": true,
-    "attack_n": 40,
-    "benign_n": 25,
-    "attack_sha256": "ba63a139ae84be4554dcc069def19bfed7248ab3264f330899205056bdf8ec34",
-    "benign_sha256": "757f29c169acabfb3a0fe20f23fdd6cb1f0ff7c2cfb8e6bdde1e7cb55c286178",
-    "policy_version": "2026-09-27.1",
-    "prompt_version": "p1.2.0",
-    "note": "CI 离线门禁基线：A 组（规则基线）不调用模型，因此这组指标是完全确定性的。数据集或规则表被改坏 → 这里的 IR/PIR 会掉 → 门禁 fail。"
-  }
+  "wall_clock_sec": 0.1
 }

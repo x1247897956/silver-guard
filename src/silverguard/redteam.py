@@ -1,7 +1,6 @@
 """自动红队 / 对抗式评测：对被拦下的样本做变异，看绕过率怎么走。
 
-> 措辞纪律：这是**自动红队 / 对抗式评测**，不是"多智能体协作"。
-> 攻击方 LLM 与守护 Agent 是**对抗关系**，不是协作关系。
+> 攻击方 LLM 与守护 Agent 构成自动红队 / 对抗式评测流程。
 
 流程（设计文档 §6.3）：
 
@@ -12,7 +11,7 @@
     R2  再跑一遍 → 出绕过率曲线
 
 两条纪律：
-1. **heldout 集全程封存**，只在共演进开始前与结束后各跑一次；
+1. **heldout 集全程封存**，由最终评测命令单独运行一次，红队流程禁止访问；
    主结论用 heldout，dev 曲线只作"对抗迭代过程"的过程证据；
 2. **变异样本保留为单独文件**（`attack_redteam_R{n}.jsonl`），
    不打散写回 `attack.jsonl`——原始数据集一旦被改动，sha256 就失去意义。
@@ -58,12 +57,20 @@ MUTATION_CN = {
 def evaluate_cases(cases: list[CaseInput], *, settings: Settings, store: MemoryStore, policy,
                    patterns_path: Path, llm: LLMClient, config: str = "agent_memory",
                    trace_dir: Path | None = None) -> tuple[list, dict[str, Any]]:
-    agent = GuardianAgent(settings=settings, store=store, policy=policy,
-                          patterns_path=patterns_path, llm=llm, config=config,
-                          tool_runtime=ToolRuntime(store=store))
     rows = []
     for case in cases:
-        a = agent.assess(case)
+        # Independent cases and rounds must not inherit previous intervention TTL or risk state.
+        case_store = MemoryStore(":memory:")
+        seed_demo_profile(case_store)
+        agent = GuardianAgent(settings=settings, store=case_store, policy=policy,
+                              patterns_path=patterns_path, llm=llm, config=config,
+                              tool_runtime=ToolRuntime(store=case_store))
+        try:
+            a = agent.assess(case)
+        finally:
+            case_store.close()
+        if "evidence_extraction" in a.degraded_dims:
+            raise RuntimeError(f"{case.case_id}: 证据抽取失败，红队评测无效")
         tp = ""
         if trace_dir is not None:
             trace_dir.mkdir(parents=True, exist_ok=True)
@@ -110,17 +117,18 @@ def mutate_case(client: LLMClient, case: CaseInput, mutation: str) -> dict[str, 
         "parent_case_id": case.case_id,
         "fraud_type": case.kind if case.kind in FRAUD_TYPES else "impersonate_official",
         "turns": turns,
-        "transfer_turn": tt,
+        "transfer_turn": None,
+        "suggested_transfer_turn": tt,
         "se_attack": se,
         "se_type": se_type,
-        "gold_min_level": case.gold_min_level,
+        "gold_min_level": None,
         "gold_signals": [],
         "gold_tools": ["check_contact", "check_fraud_pattern"],
         "split": "dev",
         "source_note": f"自动红队变异（{MUTATION_CN.get(mutation, mutation)}），父样本 {case.case_id}",
-        "manual_review": {"reviewed": True, "reviewer": "redteam-generator+compliance-scan",
+        "manual_review": {"reviewed": False, "reviewer": "",
                           "date": time.strftime("%Y-%m-%d"),
-                          "note": "对抗样本：只用于防御评测；已过合规预筛，不含作案细节"},
+                          "note": "待逐条审核话术合规、transfer_turn、gold_min_level；自动预筛不等于人工审核"},
         "mutation": mutation,
         "generation": {"model_requested": resp.model_requested,
                        "model_reported": resp.model_reported, "temperature": 0.9},
@@ -129,8 +137,11 @@ def mutate_case(client: LLMClient, case: CaseInput, mutation: str) -> dict[str, 
 
 def run_redteam(*, rounds: int = 2, settings: Settings | None = None,
                 dataset_dir: Path | None = None, out_dir: Path | None = None,
-                heldout_eval: bool = True, max_mutate: int | None = None,
-                seed: int = 20260927) -> dict[str, Any]:
+                heldout_eval: bool = False, max_mutate: int | None = None,
+                limit: int | None = None,
+                seed: int = 20260927, reviewed_dir: Path | None = None) -> dict[str, Any]:
+    if heldout_eval:
+        raise ValueError("红队流程禁止评测 heldout；请在全部开发结束后用 runner 最终评测一次")
     settings = settings or get_settings(require_key=True)
     dataset_dir = dataset_dir or settings.dataset_dir
     out_dir = out_dir or (dataset_dir / "redteam")
@@ -142,8 +153,10 @@ def run_redteam(*, rounds: int = 2, settings: Settings | None = None,
 
     dev_attack = [CaseInput.from_attack(r) for r in ds.attack if r.get("split") == "dev"]
     dev_benign = [CaseInput.from_benign(r) for r in ds.benign if r.get("split") == "dev"]
-    held_attack = [CaseInput.from_attack(r) for r in ds.attack if r.get("split") == "heldout"]
-    held_benign = [CaseInput.from_benign(r) for r in ds.benign if r.get("split") == "heldout"]
+    if limit is not None:
+        if limit < 1:
+            raise ValueError("--limit 必须大于 0")
+        dev_attack, dev_benign = dev_attack[:limit], dev_benign[:limit]
 
     client = LLMClient(api_key=settings.api_key, model=settings.model, base_url=settings.base_url,
                        temperature=0.9, timeout=settings.request_timeout)
@@ -158,6 +171,8 @@ def run_redteam(*, rounds: int = 2, settings: Settings | None = None,
         "rounds": [], "heldout": {}, "notes": [
             "主结论用 heldout；dev 曲线只作为对抗迭代的过程证据。",
             "变异样本单独落盘，不回写 attack.jsonl（否则数据集 sha256 失去意义）。",
+            (f"R0 使用开发子集 limit={limit}（attack {len(dev_attack)} / benign {len(dev_benign)}）；"
+             "结果不外推到完整开发集。" if limit is not None else ""),
         ],
     }
 
@@ -175,21 +190,15 @@ def run_redteam(*, rounds: int = 2, settings: Settings | None = None,
             "bypassed": sorted(r.case_id for r in attacks if not r.intercepted),
         }
 
-    # ── heldout 基线（只在共演进开始前跑这一次）─────────────────────
-    if heldout_eval and (held_attack or held_benign):
-        rows, meta = evaluate_cases(held_attack + held_benign, settings=settings, store=store,
-                                    policy=policy, patterns_path=patterns_path, llm=client)
-        result["heldout"]["baseline"] = snapshot(rows, meta, held_attack + held_benign)
-        log.info("heldout 基线完成：IR=%s PIR=%s", result["heldout"]["baseline"]["IR"],
-                 result["heldout"]["baseline"]["PIR"])
-
     # ── R0 .. Rn ───────────────────────────────────────────────────
     current = list(all_dev)
     for rnd in range(rounds + 1):
         log.info("▶ 红队轮次 R%d（%d 条案例）", rnd, len(current))
         rows, meta = evaluate_cases(current, settings=settings, store=store, policy=policy,
                                     patterns_path=patterns_path, llm=client,
-                                    trace_dir=REPO_ROOT / "data" / "runs")
+                                    # Keep red-team traces separate so this experiment never
+                                    # overwrites replayable baseline evaluation traces.
+                                    trace_dir=out_dir / "runs")
         snap = snapshot(rows, meta, current)
         snap["round"] = f"R{rnd}"
         snap["n_mutated_included"] = sum(1 for r in rows if r.is_attack and r.case_id.startswith("rt-"))
@@ -211,7 +220,8 @@ def run_redteam(*, rounds: int = 2, settings: Settings | None = None,
             row = mutate_case(client, case, mutation)
             if row is None:
                 continue
-            errs = [e for e in validate_case(row, is_attack=True) if "manual_review" not in e]
+            errs = [e for e in validate_case(row, is_attack=True)
+                    if "审核痕迹" not in e and "gold_min_level" not in e]
             issues = compliance_scan([row])
             if errs or issues:
                 log.warning("变异样本被拒（%s）：%s %s", row["case_id"], errs,
@@ -229,13 +239,22 @@ def run_redteam(*, rounds: int = 2, settings: Settings | None = None,
             m: sum(1 for r in new_rows if r.get("mutation") == m) for m in MUTATIONS if
             any(r.get("mutation") == m for r in new_rows)
         }
-        current = current + [CaseInput.from_attack(r) for r in new_rows]
-
-    # ── heldout 复测（共演进结束后，只跑这一次）─────────────────────
-    if heldout_eval and (held_attack or held_benign):
-        rows, meta = evaluate_cases(held_attack + held_benign, settings=settings, store=store,
-                                    policy=policy, patterns_path=patterns_path, llm=client)
-        result["heldout"]["after_evolution"] = snapshot(rows, meta, held_attack + held_benign)
+        reviewed_path = reviewed_dir / path.name if reviewed_dir else None
+        if reviewed_path is None or not reviewed_path.exists():
+            result["notes"].append(f"R{rnd + 1}: 候选已落盘，等待逐条审核和金标确认，未纳入指标")
+            result["pending_review"] = str(path)
+            break
+        reviewed = [json.loads(line) for line in reviewed_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        allowed_parents = {c.case_id for c in intercepted}
+        existing_ids = {c.case_id for c in current}
+        for row in reviewed:
+            errors = validate_case(row, is_attack=True)
+            if (errors or compliance_scan([row]) or row.get("split") != "dev"
+                    or row.get("parent_case_id") not in allowed_parents
+                    or row.get("case_id") in existing_ids):
+                raise ValueError(f"审核变体非法: {row.get('case_id')}: {errors}")
+            existing_ids.add(row["case_id"])
+        current = current + [CaseInput.from_attack(r) for r in reviewed]
 
     result["llm_totals"] = {"calls": client.calls, "model_reported": client.reported_model,
                             "prompt_tokens": client.prompt_tokens,
@@ -332,7 +351,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--dataset", default=None)
     p.add_argument("--traces-dir", default=str(REPO_ROOT / "data" / "runs"))
     p.add_argument("--max-mutate", type=int, default=None, help="每轮最多变异多少条（控成本）")
-    p.add_argument("--no-heldout", action="store_true")
+    p.add_argument("--limit", type=int, default=None, help="R0/Rn 每类最多评测条数（控成本）")
+    p.add_argument("--no-heldout", action="store_true", help="兼容参数；红队始终封存 heldout")
+    p.add_argument("--reviewed-dir", type=Path, default=None, help="逐条审核并确认金标后的变体目录")
     p.add_argument("--persuasion", action="store_true", help="额外跑老人模拟器（劝说成功率）")
     p.add_argument("--persuasion-limit", type=int, default=20)
     p.add_argument("--json-out", default=None)
@@ -346,7 +367,8 @@ def main(argv: list[str] | None = None) -> int:
     settings = get_settings(require_key=True)
     result = run_redteam(rounds=args.rounds,
                          dataset_dir=Path(args.dataset) if args.dataset else None,
-                         heldout_eval=not args.no_heldout, max_mutate=args.max_mutate)
+                         heldout_eval=False, max_mutate=args.max_mutate, limit=args.limit,
+                         reviewed_dir=args.reviewed_dir)
     if args.persuasion:
         result["persuasion"] = persuasion_experiment(settings=settings, limit=args.persuasion_limit)
     print(json.dumps({k: v for k, v in result.items() if k != "rounds"}, ensure_ascii=False, indent=2))

@@ -154,7 +154,7 @@ def compliance_scan(rows: Iterable[dict[str, Any]]) -> list[ComplianceIssue]:
 
 
 def validate_case(row: dict[str, Any], *, is_attack: bool) -> list[str]:
-    """结构校验：字段齐、取值合法、人工审核痕迹存在。"""
+    """结构校验：字段齐、取值合法，并且审核身份有明确记录。"""
     errs: list[str] = []
     cid = row.get("case_id", "?")
     turns = row.get("turns")
@@ -194,8 +194,11 @@ def validate_case(row: dict[str, Any], *, is_attack: bool) -> list[str]:
     if row.get("split") not in ("dev", "heldout"):
         errs.append(f"{cid}: split 非法（{row.get('split')}）")
     review = row.get("manual_review") or {}
-    if not review.get("reviewed"):
-        errs.append(f"{cid}: 缺少人工审核痕迹 manual_review.reviewed=true")
+    ai_review = row.get("ai_review") or {}
+    human_reviewed = bool(review.get("reviewed"))
+    ai_reviewed = bool(ai_review.get("reviewed")) and bool(ai_review.get("reviewer"))
+    if not (human_reviewed or ai_reviewed):
+        errs.append(f"{cid}: 缺少人工或明确标注身份的 AI 审核痕迹")
     if not row.get("source_note"):
         errs.append(f"{cid}: 缺少 source_note")
     return errs

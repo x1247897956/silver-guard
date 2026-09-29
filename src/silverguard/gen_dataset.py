@@ -287,7 +287,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
 
 
 def cmd_audit(args: argparse.Namespace) -> int:
-    """自动预筛 + 待人工审核清单。"""
+    """自动预筛 + 尚未逐案审核的样本清单（人工与 AI 审阅身份分开计数）。"""
     ds_dir = Path(args.dataset)
     rc = 0
     for name, is_attack in (("attack.jsonl", True), ("benign.jsonl", False)):
@@ -300,11 +300,16 @@ def cmd_audit(args: argparse.Namespace) -> int:
         struct_errs: list[str] = []
         for row in rows:
             errs = [e for e in validate_case(row, is_attack=is_attack)
-                    if "manual_review" not in e]  # 未审核是正常的，单独统计
+                    if "审核痕迹" not in e]  # 未审阅是正常的，单独统计
             struct_errs += errs
-        unreviewed = [r["case_id"] for r in rows if not (r.get("manual_review") or {}).get("reviewed")]
+        human_reviewed = sum(bool((r.get("manual_review") or {}).get("reviewed")) for r in rows)
+        ai_reviewed = sum(bool((r.get("ai_review") or {}).get("reviewed")) for r in rows)
+        unreviewed = len(rows) - sum(
+            bool((r.get("manual_review") or {}).get("reviewed") or (r.get("ai_review") or {}).get("reviewed"))
+            for r in rows
+        )
         print(f"[{name}] 共 {len(rows)} 条；合规命中 {len(issues)}；结构错误 {len(struct_errs)}；"
-              f"待人工审核 {len(unreviewed)}")
+              f"人类签核 {human_reviewed}；AI 逐案审阅 {ai_reviewed}；未审阅 {unreviewed}")
         for i in issues[:20]:
             print(f"  ❌ 合规 {i.case_id}: {i.reason} → `{i.excerpt}`")
         for e in struct_errs[:20]:

@@ -79,7 +79,7 @@ async def run(*, python: str | None = None) -> dict[str, Any]:
             # ⑤ 不可逆动作 + 低授权等级 → 必须被权限层拒绝
             out["calls"].append(await _call(session, "notify_family", {
                 "elder_id": "elder-0001", "summary": "越权尝试", "__authorized_level": "L1"}))
-            # ⑥ 不可逆动作 + 足够授权等级 → 允许（mock）
+            # ⑥ 伪造高授权等级也不能通过外部接口触发写操作
             out["calls"].append(await _call(session, "notify_family", {
                 "elder_id": "elder-0001", "summary": "达到 L3", "__authorized_level": "L3"}))
     return out
@@ -106,7 +106,7 @@ def summarize(out: dict[str, Any]) -> dict[str, Any]:
         "profile_read_ok": bool(inner[2].get("exists")),
         "invented_identifier_rejected": rejected(3, "semantic"),
         "low_privilege_rejected": rejected(4, "privilege"),
-        "authorized_notify_ok": bool(inner[5].get("sent")),
+        "forged_privilege_rejected": rejected(5, "privilege"),
     }
     checks["all_ok"] = all(v for k, v in checks.items() if k != "tools_exposed")
     return {"checks": checks,

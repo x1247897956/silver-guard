@@ -148,11 +148,18 @@ class LLMClient:
                 return out
             except Exception as exc:  # noqa: BLE001
                 last_error = f"{type(exc).__name__}: {exc}"
+                # Authentication, billing and request errors need external changes;
+                # retrying them only delays an explicit degraded result.
+                if isinstance(exc, httpx.HTTPStatusError):
+                    status = exc.response.status_code
+                    last_error = f"HTTP {status}: {exc.response.reason_phrase}"
+                    if 400 <= status < 500 and status not in (408, 429):
+                        break
                 if attempt < self.max_retries:
                     time.sleep(0.6 * (2 ** (attempt - 1)))
                     continue
         self.failures += 1
-        raise LLMError(f"模型调用失败（{self.max_retries} 次重试后）：{last_error}")
+        raise LLMError(f"模型调用失败（{attempt} 次尝试后）：{last_error}")
 
     def complete_json(self, *, system: str, user: str, max_tokens: int = 1400,
                       temperature: float | None = None, use_cache: bool = True) -> tuple[Any, LLMResponse]:

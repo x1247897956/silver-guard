@@ -15,7 +15,7 @@
       }
     }
 
-暴露的四个 tool 与内部工具层**是同一份实现**（`tools.py`），因此
+暴露的三个只读 tool 与内部工具层**是同一份实现**（`tools.py`），因此
 schema 校验、权限最小化、幂等、降级行为在 MCP 侧完全一致——不存在
 "内部一套、外部一套"的偏差。
 
@@ -47,8 +47,6 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
                      "identifier 必须是对话轨迹里真实出现过的值，模型自造会被拒绝。",
     "check_fraud_pattern": "对给定文本做已知诈骗话术的确定性规则匹配，返回命中规则、权重和与版本号。",
     "get_elder_profile": "读取老人长期记忆：档案、白名单家属、历史被诱导事件、近期大额支出。",
-    "notify_family": "（mock）向白名单家属发出风险提醒。不可逆动作：需要策略表授权等级；"
-                     "TTL 内对同一对象只会真正执行一次（干预幂等）；非白名单 member_id 直接拒绝。",
 }
 
 
@@ -89,7 +87,7 @@ def build_server(*, store: MemoryStore | None = None,
                          _params: types.PaginatedRequestParams | None) -> types.ListToolsResult:
         tools = []
         for name in registry.names():
-            if name == "record_case":
+            if name not in TOOL_DESCRIPTIONS:
                 continue  # record_case 是内部落库动作，不对外开放
             tools.append(types.Tool(
                 name=name,
@@ -101,12 +99,12 @@ def build_server(*, store: MemoryStore | None = None,
     async def call_tool(_ctx: Any,
                         params: types.CallToolRequestParams) -> types.CallToolResult:
         args = dict(params.arguments or {})
-        # 外部调用方必须显式声明自己的风险等级；默认 L0 → 不可逆动作会被权限层拒绝
-        level = str(args.pop("__authorized_level", "L0"))
-        if params.name == "record_case":
-            payload: dict[str, Any] = {"ok": False, "error": "record_case 不对外开放"}
+        # External callers cannot attest their own authorization level.
+        if params.name not in TOOL_DESCRIPTIONS:
+            payload: dict[str, Any] = {"ok": False, "error": "仅开放只读核验工具",
+                                       "rejected_by": "privilege"}
         else:
-            call = registry.call(params.name, args, level=level)
+            call = registry.call(params.name, args, level="L0")
             payload = {
                 "ok": call.ok,
                 "result": call.result,
@@ -126,7 +124,7 @@ def build_server(*, store: MemoryStore | None = None,
     server: Server = Server(
         "silverguard",
         version="0.1.0",
-        instructions="银发反诈守护 Agent 的工具集（只读核验 + mock 通知）。数据为本地 mock，不接真实账户。",
+        instructions="银发反诈守护 Agent 的工具集（只读核验）。数据为本地 mock，不接真实账户。",
         on_list_tools=list_tools,
         on_call_tool=call_tool,
     )

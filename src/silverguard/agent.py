@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import time
@@ -195,8 +196,10 @@ class GuardianAgent:
         self.policy = policy
         self.config = config
         self.use_memory = (config == "agent_memory") if use_memory is None else use_memory
-        self.replay_cache = replay_cache or {}
-        self.replaying = bool(replay_cache)
+        self.replay_cache = replay_cache if replay_cache is not None else {}
+        # A populated response cache may be shared across cases; that alone does
+        # not mean the agent is replaying a recorded trace. Replay callers opt in.
+        self.replaying = False
         self.llm = llm
         patterns_path = Path(patterns_path or (settings.policy_path.parent / "fraud_patterns.yaml"))
         self.rules, self.rule_version = load_pattern_rules(patterns_path)
@@ -240,6 +243,8 @@ class GuardianAgent:
                                   turn_index=None, kind="degraded", action="llm_unavailable",
                                   payload={"error": str(exc)})
         finally:
+            # A later provider failure must not erase earlier interception timing.
+            self._finalize(assessment)
             self.store.save_session(state)
         assessment.max_level = state.current_level
         assessment.latency_ms = int((time.perf_counter() - started) * 1000)
@@ -336,13 +341,12 @@ class GuardianAgent:
                 a.degraded_dims.append("elder_profile")
                 profile_block = "（老人档案维度未知：工具失败，不做任何假设）"
 
-        pre_records: list[TurnRecord] = []
         if self._profile_call is not None:
             # 记忆读取发生在第一轮之前；单独记一条 turn_index=0 的轨迹，
             # 这样"长期记忆真的被读到"在 runs / trace 里可核对。
             record0 = TurnRecord(turn_index=0, speaker="__memory__", text="(读取长期记忆)")
             record0.tool_calls.append(self._profile_call)
-            pre_records.append(record0)
+            a.turns.append(record0)
             self._profile_call = None
 
         for i, turn in enumerate(case.turns, start=1):
@@ -402,7 +406,6 @@ class GuardianAgent:
             if level_rank(state.current_level) >= 3:
                 self._maybe_notify(case, a, record, state, session_id, i)
             a.turns.append(record)
-        a.turns = pre_records + a.turns
         self._finalize(a)
 
     # ── 工具规划（确定性映射）───────────────────────────────────────
@@ -477,20 +480,20 @@ class GuardianAgent:
         history_turns = self.budget.compact_turns(turns, limit)
         user = prompts.evidence_user_prompt(history_turns, upto=None, memory_note=memory_note,
                                             already=already)
-        if self.llm is None:
-            return {"signals": [], "suggested_level": "L0", "victim_compromise": False}
-        key = f"evidence|{self.llm.model}|{PROMPT_VERSION}|{hash(user)}"
-        from_cache = self.replaying and key in self.replay_cache
+        key = f"evidence|{PROMPT_VERSION}|{hashlib.sha256(user.encode('utf-8')).hexdigest()}"
+        from_cache = key in self.replay_cache
         payload: dict[str, Any]
         if from_cache:
             payload = self.replay_cache[key]
         else:
+            if self.replaying:
+                raise LLMError("回放模式缺少该轮录制结果（轨迹不完整）")
+            if self.llm is None:
+                return {"signals": [], "suggested_level": "L0", "victim_compromise": False}
             payload, _resp = self.llm.complete_json(system=prompts.EVIDENCE_SYSTEM, user=user,
                                                     max_tokens=1200)
             if not isinstance(payload, dict):
                 payload = {"signals": [], "suggested_level": "L0"}
-            if self.replaying:
-                raise LLMError("回放模式缺少该轮录制结果（轨迹不完整）")
             self.replay_cache[key] = payload
         return payload
 

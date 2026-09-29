@@ -214,3 +214,61 @@ def test_replay_is_consistent(store: MemoryStore, policy):
     second = replay_agent.assess(make_case())
     assert (first.max_level, first.first_l2_turn, first.final_action) == (
         second.max_level, second.first_l2_turn, second.final_action)
+
+
+def test_mid_session_llm_failure_preserves_interception_and_memory_trace(store, policy):
+    from silverguard.llm import LLMError
+
+    class FailingLLM(FakeLLM):
+        def complete_json(self, **kwargs):
+            if self.calls:
+                raise LLMError('HTTP 402')
+            return super().complete_json(**kwargs)
+
+    llm = FailingLLM([{
+        'signals': [
+            {'type': 'money_action', 'quote': '转过去', 'confidence': 0.9},
+            {'type': 'secrecy', 'quote': '别告诉家人', 'confidence': 0.9},
+        ], 'suggested_level': 'L3',
+    }])
+    case = CaseInput(case_id='partial-failure', turns=[
+        {'role': 'fraud', 'text': '转过去，别告诉家人。'},
+        {'role': 'elder', 'text': '为什么？'},
+    ])
+    result = build_agent(store, policy, 'agent_memory', llm=llm).assess(case)
+    assert 'evidence_extraction' in result.degraded_dims
+    assert result.max_level == 'L3'
+    assert result.first_l2_turn == 1
+    assert result.proposed_max_level == 'L3'
+    assert result.turns[0].speaker == '__memory__'
+    assert result.turns[0].tool_calls[0].name == 'get_elder_profile'
+    assert result.llm_calls == 1
+
+
+def test_replay_uses_recorded_semantic_evidence_without_model(store, policy):
+    import json
+
+    case = CaseInput(case_id='semantic-replay', turns=[
+        {'role': 'caller', 'text': '这个安排只有我们两个人知道。'},
+    ])
+    llm = FakeLLM([{'signals': [
+        {'type': 'identity_doubt', 'quote': '我们', 'confidence': 0.9},
+        {'type': 'secrecy', 'quote': '只有我们两个人知道', 'confidence': 0.9},
+    ], 'suggested_level': 'L2'}])
+    cache = {}
+    agent = GuardianAgent(settings=None, store=store, policy=policy, patterns_path=PATTERNS_PATH,
+                          llm=llm, config='agent', replay_cache=cache)
+    first = agent.assess(case)
+    assert cache
+    assert first.max_level == 'L2'
+    with_store = MemoryStore(':memory:')
+    seed_demo_profile(with_store)
+    replay = GuardianAgent(settings=None, store=with_store, policy=policy,
+                           patterns_path=PATTERNS_PATH, config='agent',
+                           replay_cache=json.loads(json.dumps(cache)))
+    second = replay.assess(case)
+    assert second.max_level == first.max_level
+    assert second.first_l2_turn == first.first_l2_turn
+    assert not second.degraded_dims
+    assert second.llm_calls == 0
+    with_store.close()

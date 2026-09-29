@@ -26,6 +26,7 @@ from .llm import LLMClient, LLMError
 from .memory import MemoryStore, seed_demo_profile
 from .policy import PolicyEngine, load_policy
 from .prompts import INTERVENTION_BY_LEVEL, INTERVENTION_SYSTEM
+from .replay import replay_trace
 from .tools import ToolRuntime
 
 log = logging.getLogger("silverguard.service")
@@ -157,6 +158,10 @@ def build_app(*, settings=None, store: MemoryStore | None = None,
                 agent.llm.close()
         state["assess_calls"] += 1
         state["last_level"] = assessment.max_level
+        if "evidence_extraction" in assessment.degraded_dims:
+            state["llm_errors"] += 1
+            return JSONResponse({"detail": "模型不可用，评估未完成",
+                                 "partial_assessment": assessment.to_dict()}, status_code=502)
         return JSONResponse({
             "case_id": assessment.case_id,
             "config": config,
@@ -206,20 +211,18 @@ def build_app(*, settings=None, store: MemoryStore | None = None,
         case_raw = trace.get("case") or {}
         if not case_raw.get("turns"):
             raise HTTPException(status_code=400, detail="trace.case.turns 缺失，无法回放")
-        case = CaseInput.from_attack({**case_raw, "case_id": case_raw.get("case_id", "replay")},
-                                     elder_id=case_raw.get("elder_id", "elder-0001"))
-        agent = make_agent(req.config, allow_llm=False)
-        agent.replaying = True
-        agent.replay_cache = dict(trace.get("llm_cache") or {})
-        assessment = agent.assess(case)
-        recorded = trace.get("assessment") or {}
-        same = (assessment.max_level == recorded.get("max_level")
-                and assessment.first_l2_turn == recorded.get("first_l2_turn")
-                and assessment.final_action == recorded.get("final_action"))
+        try:
+            replayed = replay_trace(trace, settings=settings, policy=policy,
+                                    patterns_path=patterns_path, config=req.config)
+        except (ValueError, LLMError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        recorded = trace.get("assessment") or trace
+        same = (replayed["max_level"] == recorded.get("max_level")
+                and replayed["first_l2_turn"] == recorded.get("first_l2_turn")
+                and replayed["action"] == recorded.get("final_action"))
         return JSONResponse({
-            "case_id": assessment.case_id,
-            "replayed": {"max_level": assessment.max_level, "first_l2_turn": assessment.first_l2_turn,
-                         "action": assessment.final_action},
+            "case_id": trace.get("case_id", case_raw.get("case_id", "replay")),
+            "replayed": replayed,
             "recorded": {"max_level": recorded.get("max_level"),
                          "first_l2_turn": recorded.get("first_l2_turn"),
                          "action": recorded.get("final_action")},

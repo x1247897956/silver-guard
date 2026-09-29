@@ -3,7 +3,7 @@ name: eval-gate
 # 评测门禁：指标相对基线掉线即 fail。
 #
 # 设计说明（很重要，决定了这个门禁可信不可信）：
-#   1. **A 组规则基线与 B/C/D 的判定层都不需要模型**，所以这一层门禁在 CI 里
+#   1. **A 组规则基线不需要模型**，所以这一层门禁在 CI 里
 #      永远能跑（哪怕没有 API key）。它拦的是"数据/策略/规则被改坏"。
 #   2. 当仓库配置了 secret `DEEPSEEK_API_KEY` 时，额外跑一层**全链路门禁**，
 #      比对 D 组（Agent + 长期记忆）的 PIR / FPR-L3 —— 这一层才拦得住
@@ -17,8 +17,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  offline-gate:
-    name: 离线门禁（A 组，零模型调用）
+  rule-gate:
+    name: 规则门禁（A 组，零模型调用）
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -30,13 +30,13 @@ jobs:
         run: |
           uv run python -m silverguard.runner \
             --configs rule --split dev --ci-subset --no-traces \
-            --json-out data/eval-ci-offline.json \
+            --json-out data/eval-ci-rule.json \
             --baseline eval/baseline.json --gate
 
   full-gate:
     name: 全链路门禁（D 组，需 DEEPSEEK_API_KEY）
     runs-on: ubuntu-latest
-    needs: offline-gate
+    needs: rule-gate
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5

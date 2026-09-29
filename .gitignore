@@ -26,6 +26,7 @@ venv/
 data/
 data/*.db
 data/*.db-journal
+eval/dataset/redteam/
 *.log
 logs/
 .artifacts/

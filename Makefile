@@ -23,6 +23,7 @@ DATASET_DIR ?= eval/dataset
 RUNS_DIR    ?= data/runs
 CONFIGS     ?= rule,single_llm,agent,agent_memory
 SPLIT       ?= dev
+LIMIT       ?=
 
 .DEFAULT_GOAL := help
 .PHONY: help setup check-key lint fmt test report \
@@ -52,7 +53,7 @@ help:
 	@echo "  make report            把 data/*.json 的全部产物回填进 $(REPORT)"
 	@echo "  make hardening         加固项过程证据（热加载/状态机/回放/容错/权限）"
 	@echo "  make replay            轨迹确定性回放一致率"
-	@echo "  make redteam           自动红队共演进（≥2 轮）+ heldout 封存复测"
+	@echo "  make redteam           生成红队候选；逐条审核后才能进入下一轮，heldout 始终封存"
 	@echo "  make fault-tolerance   工具容错与降级实验（注入工具故障）"
 	@echo "  make compaction        上下文压缩对照（tokens 省多少 + 指标代价）"
 	@echo "  make dataset-stats     数据集构成统计 + sha256"
@@ -109,6 +110,7 @@ REPORT ?= docs/eval-report.md
 
 eval: check-key
 	$(UV) python -m silverguard.runner --configs $(CONFIGS) --split $(SPLIT) \
+		$(if $(LIMIT),--limit $(LIMIT),) \
 		--traces-dir $(RUNS_DIR) \
 		--json-out data/eval-$(SPLIT).json \
 		--out data/eval-$(SPLIT).md \
@@ -141,7 +143,7 @@ eval-matrix: check-key
 		--update-report $(REPORT)
 
 eval-gate: check-key
-	$(UV) python -m silverguard.runner --configs rule --split dev --no-traces \
+	$(UV) python -m silverguard.runner --configs rule --split dev --ci-subset --no-traces \
 		--json-out data/eval-ci.json --baseline eval/baseline.json --gate
 
 compaction: check-key
